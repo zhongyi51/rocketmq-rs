@@ -4,10 +4,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex;
+use serde_json::Value;
 use tracing::error;
 
 use crate::client::{Client, ClientOptions};
-use crate::message::MessageQueue;
+use crate::message::{MessageExt, MessageQueue};
 use crate::namesrv::NameServer;
 use crate::protocol::{
     request::{
@@ -29,6 +30,8 @@ use offset_store::{LocalFileOffsetStore, OffsetStorage, RemoteBrokerOffsetStore}
 use process_queue::ProcessQueue;
 pub use push::PushConsumer;
 use strategy::{AllocateAveragely, AllocateStrategy};
+use crate::consumer::offset_store::OffsetStore;
+use crate::protocol::RequestCode::GetConsumerListByGroup;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MessageModel {
@@ -149,13 +152,26 @@ impl fmt::Display for ConsumeType {
     }
 }
 
+pub(crate) struct SubscriptionData{}
+
 #[derive(Debug)]
-pub(crate) struct ConsumerInner {}
+pub(crate) struct ConsumerInner {
+}
 
 impl ConsumerInner {
     pub fn rebalance(&self) {
-        todo!()
+        self.subscription_map.iter()
+            .for_each(|(topic,sub_data)|{
+                match self.model{
+                    MessageModel::BroadCasting => {todo!("Support broadcasting msg")}
+                    MessageModel::Clustering => {
+
+                    }
+                }
+            })
     }
+
+
 }
 
 #[derive(Debug)]
@@ -167,6 +183,8 @@ pub struct Consumer {
     storage: OffsetStorage,
     allocate: AllocateStrategy,
     process_queue_map: HashMap<MessageQueue, ProcessQueue>,
+    subscription_map:HashMap<String,SubscriptionData>,
+    subscription_topic_info_map:HashMap<String,Vec<MessageQueue>>
 }
 
 impl Consumer {
@@ -176,7 +194,7 @@ impl Consumer {
 
     pub fn with_options(options: ConsumerOptions) -> Result<Self, Error> {
         let client_options = options.client_options.clone();
-        let inner = Arc::new(Mutex::new(ConsumerInner {}));
+        let inner = Arc::new(Mutex::new(ConsumerInner{}));
         let name_server =
             NameServer::new(options.resolver.clone(), client_options.credentials.clone())?;
         let client = Client::new(client_options, name_server);
@@ -321,6 +339,44 @@ impl Consumer {
             })
         }
     }
+
+    pub async fn rebalance(&self) {
+        for (topic,value) in &self.subscription_map{
+                match self.options.message_model{
+                    MessageModel::BroadCasting => {todo!("Support broadcasting msg")}
+                    MessageModel::Clustering => {
+                        if let Ok(mut consume_ls) =self.get_consumer_list(topic).await{
+                            consume_ls.sort();
+                            if let Some(q)=self.subscription_topic_info_map.get(topic){
+                                let mut queues=q.clone();
+                                queues.sort_by(|i,j|
+                                    i.topic.cmp(&j.topic)
+                                        .then(i.broker_name.cmp(&j.broker_name))
+                                        .then(i.queue_id.cmp(&j.queue_id)));
+                                let alloc_res=self.allocate
+                                    .allocate(&self.consumer_group, &self.client.id(),queues.as_slice(),consume_ls.iter().map(|sr|sr.as_str()).collect::<Vec<&str>>().as_slice());
+                                todo!()
+                            }
+                        }
+                    }
+                }
+            }
+    }
+
+    // todo!(Support pull consumer)
+    async fn update_queue_map(&mut self,topic:&str,queues:&Vec<MessageQueue>)->bool{
+        for (mq,pq) in &mut self.process_queue_map{
+            if mq.topic.eq(topic){
+                if !queues.contains(mq){
+                    pq.set_dropped(true);
+                    self.storage.persist(vec![mq.clone()].as_slice()).await;
+                    self.storage.remove(mq);
+                    self.process_queue_map.remove(mq);
+                }
+            }
+        }
+        todo!()
+    }
 }
 
 impl Drop for Consumer {
@@ -331,8 +387,13 @@ impl Drop for Consumer {
 
 #[cfg(test)]
 mod test {
+    use std::time::Duration;
+    use tokio::time::sleep;
+    use crate::consumer::{ConsumeResult, ConsumerReturn};
+    use crate::consumer::push::MessageSelector;
     use super::{Consumer, ConsumerOptions};
-    use crate::message::MessageQueue;
+    use crate::message::{MessageExt, MessageQueue};
+    use crate::PushConsumer;
 
     #[tokio::test]
     async fn test_get_consumer_list() {
@@ -372,5 +433,19 @@ mod test {
         };
         let offset = consumer.search_offset_by_timestamp(&mq, 0).await.unwrap();
         assert!(offset >= 0);
+    }
+
+    #[tokio::test]
+    async fn test_push_consumer(){
+        let mut options = ConsumerOptions::default();
+        options.set_name_server(vec!["localhost:9876".to_string()]);
+        let consumer=PushConsumer::with_options(options).unwrap();
+        consumer.start();
+
+        async fn cb(msgs:Vec<MessageExt>)->ConsumeResult{
+            sleep(Duration::from_secs(100)).await;
+            return ConsumeResult::Success;
+        }
+        consumer.subscribe("SELC_TEST_TOPIC",MessageSelector::NULL,cb);
     }
 }

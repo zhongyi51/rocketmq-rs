@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 
 use parking_lot::RwLock;
 use time::OffsetDateTime;
@@ -33,6 +33,10 @@ impl ProcessQueue {
             last_lock_timestamp: AtomicI64::new(ts),
             consuming: AtomicBool::new(false),
         }
+    }
+
+    pub fn set_dropped(&mut self, dropped: bool){
+        self.dropped.store(dropped,Ordering::Acquire);
     }
 }
 
